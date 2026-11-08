@@ -3,7 +3,7 @@
 // verifyNfseEventoSignature; lê qualquer tipo do XSD (e101101, e105102, e305101..3) e devolve o tipo, em vez de só o
 // cancelamento; dhEvento de infPedReg (o Luminaris lia infEvento/dhProc); caminho exato a partir da raiz.
 // regra: XSD tiposEventos_v1.01.xsd TCEvento/TCInfEvento/TCPedRegEvt/TCInfPedReg · cerca: test/leitores.test.ts
-import { Recusa, filhoUnico, filhosEl, protegido, raizDe, valorDe, dataHoraDe, type Falha } from './ler-comum.js'
+import { Recusa, filhoUnico, filhosEl, noNamespace, protegido, raizDe, valorDe, dataHoraDe, type Falha } from './ler-comum.js'
 
 export type ResultadoEvento = { ok: true; tipo: string; chave: string; dhEvento: string; dataEvento: string } | Falha
 
@@ -21,7 +21,7 @@ export function lerEvento(xml: string): ResultadoEvento {
     const raiz = raizDe(xml, 'evento')
     const ped = filhoUnico(filhoUnico(filhoUnico(raiz, 'infEvento'), 'pedRegEvento'), 'infPedReg')
     const chave = valorDe(ped, 'chNFSe', CHAVE, '50 posições')
-    const grupos = filhosEl(ped).filter((f) => /^e\d{6}$/.test(f.local))
+    const grupos = filhosEl(ped).filter((f) => /^e\d{6}$/.test(f.local) && noNamespace(f))
     if (grupos.length !== 1) throw new Recusa(`esperado exatamente 1 grupo de evento (eNNNNNN) em infPedReg, achei ${grupos.length}`)
     const tipo = grupos[0].local.slice(1)
     if (!TIPOS.has(tipo)) throw new Recusa(`tipo de evento ${tipo} fora do XSD`)

@@ -18,7 +18,7 @@ export function protegido<T>(leitor: () => T): T | Falha {
   }
 }
 
-const noNamespace = (el: Elem) => el.ns.get(el.prefixo) === NS
+export const noNamespace = (el: Elem) => el.ns.get(el.prefixo) === NS
 
 /** Lê o XML e exige que a RAIZ seja `<local>` no namespace da NFS-e. */
 export function raizDe(xml: unknown, local: string): Elem {

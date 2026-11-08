@@ -138,6 +138,12 @@ describe('lerEvento', () => {
       const r = lerEvento(eventoCom({ grupos: `<e101101><chNFSe>${FORJADA}</chNFSe></e101101>` }))
       expect(r).toMatchObject({ ok: true, chave: CHAVE })
     })
+    it('grupo eNNNNNN em outro namespace, sozinho em infPedReg: recusa', () => {
+      expect(lerEvento(eventoCom({ grupos: '<e105102 xmlns="urn:x"/>' }))).toEqual(recusa)
+    })
+    it('grupo eNNNNNN em outro namespace ao lado do verdadeiro: lê o verdadeiro', () => {
+      expect(lerEvento(eventoCom({ grupos: '<e105102 xmlns="urn:x"/><e101101/>' }))).toMatchObject({ ok: true, tipo: '101101' })
+    })
     it('chNFSe duplicado em infPedReg: recusa', () => {
       expect(lerEvento(eventoCom({ grupos: `<chNFSe>${FORJADA}</chNFSe><e101101/>` }))).toEqual(recusa)
     })
