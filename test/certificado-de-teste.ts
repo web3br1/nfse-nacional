@@ -20,18 +20,28 @@ const algRsa = (hash) => seq(Buffer.from([0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0x
 const nomeCn = (cn) => seq(der(0x31, seq(OID_CN, der(0x0c, Buffer.from(cn)))))
 const pem = (rotulo, buf) => `-----BEGIN ${rotulo}-----\n${buf.toString('base64').match(/.{1,64}/g).join('\n')}\n-----END ${rotulo}-----\n`
 
-export async function gerarCertificado({ cn = 'teste T2.2', hash = 'SHA-1', ip } = {}) {
+// T1.6: otherName do ICP-Brasil no subjectAltName (DOC-ICP-04 7.1.2.2). `cnpj` = 2.16.76.1.3.3 (PrintableString);
+// `cpf` = 2.16.76.1.3.1 (OCTET STRING: nascimento ddmmaaaa + CPF + NIS + RG...). Sem eles o certificado sai como antes.
+const OID_ICP_CNPJ = [0x60, 0x4c, 0x01, 0x03, 0x03]
+const OID_ICP_CPF = [0x60, 0x4c, 0x01, 0x03, 0x01]
+const otherName = (oid, tag, valor) =>
+  der(0xa0, Buffer.from([0x06, oid.length, ...oid]), der(0xa0, der(tag, Buffer.from(valor))))
+
+export async function gerarCertificado({ cn = 'teste T2.2', hash = 'SHA-1', ip, cnpj, cpf, cpfCru, validade } = {}) {
   const alg = { name: 'RSASSA-PKCS1-v1_5', hash }
   const par = await crypto.subtle.generateKey(
     { ...alg, modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) }, true, ['sign', 'verify'])
   const spki = Buffer.from(await crypto.subtle.exportKey('spki', par.publicKey))
   const nome = nomeCn(cn)
-  const extensoes = ip
-    ? [der(0xa3, seq(seq(OID_SAN, der(0x04, seq(der(0x87, ip.split('.').map(Number)))))))]
-    : []
+  const nomes = [
+    ...(ip ? [der(0x87, ip.split('.').map(Number))] : []),
+    ...(cnpj !== undefined ? [otherName(OID_ICP_CNPJ, 0x13, cnpj)] : []),
+    ...(cpf !== undefined || cpfCru !== undefined ? [otherName(OID_ICP_CPF, 0x04, cpfCru ?? `01011990${cpf}00000000000`)] : []),
+  ]
+  const extensoes = nomes.length ? [der(0xa3, seq(seq(OID_SAN, der(0x04, seq(...nomes)))))] : []
   const tbs = seq(
     der(0xa0, der(0x02, [2])), der(0x02, [1]), algRsa(hash), nome,
-    seq(der(0x17, Buffer.from('260101000000Z')), der(0x17, Buffer.from('360101000000Z'))),
+    seq(der(0x17, Buffer.from(validade?.de ?? '260101000000Z')), der(0x17, Buffer.from(validade?.ate ?? '360101000000Z'))),
     nome, spki, ...extensoes)
   const assinatura = Buffer.from(await crypto.subtle.sign(alg, par.privateKey, tbs))
   const cert = seq(tbs, algRsa(hash), der(0x03, Buffer.concat([Buffer.from([0]), assinatura])))

@@ -38,7 +38,11 @@ function decodificar(cru: string, atributo: boolean): string {
   if (atributo) s = s.replace(/[\t\n]/g, ' ')
   return s.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);|&/g, (m, ref) => {
     if (!ref) throw new Recusa('XML malformado: & solto')
-    if (ref[0] === '#') return String.fromCodePoint(ref[1] === 'x' ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10))
+    if (ref[0] === '#') {
+      const cp = ref[1] === 'x' ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10)
+      if (!(cp <= 0x10ffff)) throw new Recusa('XML malformado: referência numérica fora do Unicode')
+      return String.fromCodePoint(cp)
+    }
     return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[ref as 'amp']
   })
 }
