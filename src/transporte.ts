@@ -1,5 +1,5 @@
 // Transporte mTLS para a API da Sefin Nacional e classificação da resposta.
-// regra: T0.1 itens 1, 2, 3 e 10 (G0 Q1, Q2, Q6, Q7) · cerca: test/transporte.test.ts
+// regra: T0.1 itens 1, 2, 3 e 10 (G0 Q1, Q2, Q6, Q7) · cerca: test/transporte.test.ts, test/transporte-r1.test.ts
 import { Agent, request, type Dispatcher } from 'undici'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import type { Ambiente } from './entrada.js'
@@ -30,7 +30,12 @@ export const CAMPO_DPS = 'dpsXmlGZipB64'
 export const CAMPO_EVENTO = 'pedidoRegistroEventoXmlGZipB64'
 // hipótese G0 Q2 (open-nfse): campos da resposta de sucesso; a confirmar na T6.1
 const CAMPO_NFSE_RESPOSTA = 'nfseXmlGZipB64'
+const CAMPO_EVENTO_RESPOSTA = 'eventoXmlGZipB64'
 const CAMPO_CHAVE_RESPOSTA = 'chaveAcesso'
+
+// Raiz do XML que prova o estado final (hipótese, a confirmar na T6.1): NFS-e e evento.
+const RAIZ_NFSE = /^\s*(?:<\?xml[^>]*\?>\s*)?<NFSe[\s>/]/
+const RAIZ_EVENTO = /^\s*(?:<\?xml[^>]*\?>\s*)?<(?:evento|procEvento\w*)[\s>/]/
 
 // T0.1 item 3 (E0014, firme) e Q6 (a): o transporte não decide se foi o mesmo evento.
 const COD_DUPLICIDADE = 'E0014'
@@ -39,6 +44,9 @@ const COD_EVENTO_JA_REGISTRADO = new Set(['E0802', 'E0840', 'E0845'])
 const COD_TRANSIENTES = new Set(['E1217', 'E1206'])
 
 const TIMEOUT_PADRAO_MS = 30_000
+const TIMEOUT_MAX_MS = 2 ** 31 - 1
+/** Teto de leitura do corpo e da saída do gunzip. */
+const TETO_BYTES = 10 * 1024 * 1024
 
 // Id da DPS: DPS + IBGE(7) + tpInsc(1) + inscrição(14) + série(5) + nDPS(15) = 45 (src/id.ts).
 const ID_DPS_PRODUCAO = /^DPS\d{42}$/
@@ -51,7 +59,7 @@ export interface OpcoesTransporte {
   keyPem: string
   /** Cadeia a confiar além da lista padrão do Node. Passada ao `Agent` só quando presente. */
   ca?: string
-  /** Padrão 30 000 ms. */
+  /** Inteiro de 1 a 2^31-1. Padrão 30 000 ms. Fora disso, toda chamada devolve `falha`. */
   timeoutMs?: number
   /** Para teste: substitui o `Agent` mTLS. */
   dispatcher?: Dispatcher
@@ -62,6 +70,17 @@ export interface OpcoesTransporte {
   baseUrl?: string
 }
 
+/**
+ * Nenhum método lança: toda exceção vira `Resposta`. Um estado final (`autorizada`,
+ * `evento-registrado`, `rejeitada`) só sai com prova (XML esperado, ou código); na dúvida a
+ * classe é `transiente` ou `falha`.
+ *
+ * `falha` ou `transiente` no `emitir` (inclusive `status: 0`) pode acontecer DEPOIS de a Sefin
+ * ter aceitado a DPS: o chamador reconcilia por `existeDps`/`chaveDaDps` antes de reenviar.
+ *
+ * `mensagens` traz a `descricao` crua da Sefin e pode conter dado pessoal: registre em log só
+ * `codigos`, `status` e `classe`.
+ */
 export interface Transporte {
   /** POST /nfse */
   emitir(dpsAssinada: string): Promise<Resposta>
@@ -75,12 +94,14 @@ export interface Transporte {
   registrarEvento(chave: string, pedidoAssinado: string): Promise<Resposta>
   /** GET /nfse/{chave}/eventos */
   eventos(chave: string): Promise<Resposta & { eventosXml?: string[] }>
-  /** Fecha o `Agent` que o transporte criou (não toca num `dispatcher` recebido). */
+  /** Fecha o `Agent` que o transporte criou. Terminal: depois dele toda chamada dá `falha`. */
   fechar(): Promise<void>
 }
 
 /** Recusa por entrada ou configuração inválida: vira `falha` com a mensagem, sem request. */
 class Recusa extends Error {}
+/** Corpo ou saída do gunzip acima do teto. */
+class Excedeu extends Error {}
 
 const vazia = (status: number, classe: Classe, motivo?: string): Resposta => ({
   status, classe, codigos: [], mensagens: [], ...(motivo !== undefined ? { motivo } : {}),
@@ -92,6 +113,8 @@ function lerJson(texto: string): unknown {
   try { return JSON.parse(texto) } catch { return undefined }
 }
 
+const normalizar = (c: unknown): string => String(c).trim().toUpperCase()
+
 /** `erros` ou `erro`, em lista ou objeto, camelCase ou PascalCase; une sem duplicar (G0 Q2). */
 function extrairErros(corpo: unknown): { codigos: string[]; mensagens: string[] } {
   const codigos: string[] = []
@@ -102,10 +125,12 @@ function extrairErros(corpo: unknown): { codigos: string[]; mensagens: string[] 
     const itens = Array.isArray(v) ? v : v === undefined ? [] : [v]
     for (const it of itens) {
       if (!eObjeto(it)) continue
-      const cod = it.codigo ?? it.Codigo
-      const desc = it.descricao ?? it.Descricao
-      if (typeof cod === 'string' && cod.trim() !== '' && !codigos.includes(cod.trim())) {
-        codigos.push(cod.trim())
+      const bruto = [it.codigo, it.Codigo].find((c) => (typeof c === 'string' && c.trim() !== '') || typeof c === 'number')
+      if (bruto === undefined) continue
+      const cod = normalizar(bruto)
+      if (!codigos.includes(cod)) {
+        codigos.push(cod)
+        const desc = it.descricao || it.Descricao
         if (typeof desc === 'string') mensagens.push(desc)
       }
     }
@@ -113,18 +138,68 @@ function extrairErros(corpo: unknown): { codigos: string[]; mensagens: string[] 
   return { codigos, mensagens }
 }
 
-const descompactar = (b64: string): string => gunzipSync(Buffer.from(b64, 'base64')).toString('utf8')
+function descompactar(b64: string): string {
+  try {
+    return gunzipSync(Buffer.from(b64, 'base64'), { maxOutputLength: TETO_BYTES }).toString('utf8')
+  } catch (e) {
+    if ((e as { code?: string })?.code === 'ERR_BUFFER_TOO_LARGE') throw new Excedeu('XML descomprimido acima do teto')
+    throw e
+  }
+}
 const gzipB64 = (texto: string): string => gzipSync(Buffer.from(texto, 'utf8')).toString('base64')
 
-export function criarTransporte(o: OpcoesTransporte): Transporte {
-  let agentProprio: Agent | undefined
+function chaveValida(chave: unknown, ambiente: Ambiente): chave is string {
+  try {
+    if (typeof chave !== 'string') return false
+    idPedidoEvento({ chave, tipo: '000000' }, { chaveAlfanumerica: ambiente === 'producao-restrita' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** As opções do `Agent` mTLS; exportada para a cerca afirmar cada valor fixado. */
+export function opcoesDoAgent(o: Pick<OpcoesTransporte, 'certPem' | 'keyPem' | 'ca' | 'timeoutMs'>) {
   const timeoutMs = o.timeoutMs ?? TIMEOUT_PADRAO_MS
+  return {
+    allowH2: false,
+    headersTimeout: timeoutMs,
+    bodyTimeout: timeoutMs,
+    connect: {
+      cert: o.certPem,
+      key: o.keyPem,
+      ...(o.ca !== undefined ? { ca: o.ca } : {}),
+      minVersion: 'TLSv1.2' as const,
+      rejectUnauthorized: true,
+    },
+  }
+}
+
+export function criarTransporte(entrada: OpcoesTransporte): Transporte {
+  const o = (typeof entrada === 'object' && entrada !== null ? entrada : {}) as Partial<OpcoesTransporte>
+  let agentProprio: Agent | undefined
+  let fechado = false
+  const timeoutMs = o.timeoutMs ?? TIMEOUT_PADRAO_MS
+  const ambiente = o.ambiente as Ambiente
+
+  /** Motivo de a configuração não servir; vazio se serve. Checado em toda chamada. */
+  const erroDeConfig = (): string | undefined => {
+    if (typeof entrada !== 'object' || entrada === null) return 'opções do transporte ausentes ou inválidas'
+    if (ambiente !== 'producao' && ambiente !== 'producao-restrita') return 'ambiente inválido'
+    if (o.dispatcher === undefined && (typeof o.certPem !== 'string' || o.certPem === '' || typeof o.keyPem !== 'string' || o.keyPem === '')) {
+      return 'certPem e keyPem são obrigatórios'
+    }
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > TIMEOUT_MAX_MS) {
+      return 'timeoutMs deve ser inteiro de 1 a 2147483647'
+    }
+    return undefined
+  }
 
   /** Tira do texto qualquer trecho do certificado ou da chave (e qualquer bloco PEM). */
   const limpar = (texto: string): string => {
     let t = texto
     for (const segredo of [o.keyPem, o.certPem]) {
-      if (typeof segredo !== 'string' || segredo.length === 0) continue
+      if (typeof segredo !== 'string' || segredo.length < 8) continue
       t = t.split(segredo).join('[pem]')
       for (const linha of segredo.split(/\r?\n/)) if (linha.length >= 8) t = t.split(linha).join('[pem]')
     }
@@ -144,23 +219,12 @@ export function criarTransporte(o: OpcoesTransporte): Transporte {
 
   function dispatcher(): Dispatcher {
     if (o.dispatcher) return o.dispatcher
-    agentProprio ??= new Agent({
-      allowH2: false,
-      headersTimeout: timeoutMs,
-      bodyTimeout: timeoutMs,
-      connect: {
-        cert: o.certPem,
-        key: o.keyPem,
-        ...(o.ca !== undefined ? { ca: o.ca } : {}),
-        minVersion: 'TLSv1.2',
-        rejectUnauthorized: true,
-      },
-    })
+    agentProprio ??= new Agent(opcoesDoAgent(o as OpcoesTransporte))
     return agentProprio
   }
 
   function base(): string {
-    if (o.baseUrl === undefined) return BASE[o.ambiente]
+    if (o.baseUrl === undefined) return BASE[ambiente]
     if (o.dispatcher === undefined && o.ca === undefined) {
       throw new Recusa('baseUrl só é aceita junto de dispatcher ou ca (é para teste)')
     }
@@ -173,28 +237,31 @@ export function criarTransporte(o: OpcoesTransporte): Transporte {
   }
 
   function validarIdDps(id: unknown): string {
-    const re = o.ambiente === 'producao' ? ID_DPS_PRODUCAO : ID_DPS_RESTRITA
+    const re = ambiente === 'producao' ? ID_DPS_PRODUCAO : ID_DPS_RESTRITA
     if (typeof id !== 'string' || !re.test(id)) throw new Recusa('idDps fora do formato (DPS + 42 caracteres)')
     return id
   }
 
   function validarChave(chave: unknown): string {
-    try {
-      if (typeof chave !== 'string') throw new RangeError('chave')
-      idPedidoEvento({ chave, tipo: '000000' }, { chaveAlfanumerica: o.ambiente === 'producao-restrita' })
-    } catch {
-      throw new Recusa('chave fora do formato (50 caracteres)')
-    }
-    return chave as string
+    if (!chaveValida(chave, ambiente)) throw new Recusa('chave fora do formato (50 caracteres)')
+    return chave
   }
 
-  /** Status que não é sucesso, sem semântica própria: 3xx falha, 4xx rejeitada, 5xx transiente. */
+  /**
+   * Status sem semântica própria, sem código legível: 3xx falha; 408/429 e 5xx transiente;
+   * demais 4xx falha (rejeitada exige código).
+   */
+  function semCodigo(status: number): Resposta {
+    const classe: Classe = status >= 500 || status === 408 || status === 429 ? 'transiente' : 'falha'
+    return vazia(status, classe, `status HTTP ${status} sem código de erro legível`)
+  }
+
+  /** Resposta não 2xx de GET/HEAD. */
   function porStatus(status: number, texto: string): Resposta {
     const { codigos, mensagens } = extrairErros(lerJson(texto))
-    const classe: Classe = status >= 500 ? 'transiente' : status >= 400 ? 'rejeitada' : 'falha'
-    const r: Resposta = { status, classe, codigos, mensagens }
-    if (codigos.length === 0 || classe === 'falha') r.motivo = `status HTTP ${status} sem tratamento específico`
-    return r
+    if (codigos.length === 0 || status < 400) return semCodigo(status)
+    const classe: Classe = status >= 500 || status === 408 || status === 429 ? 'transiente' : 'rejeitada'
+    return { status, classe, codigos, mensagens }
   }
 
   /**
@@ -203,41 +270,67 @@ export function criarTransporte(o: OpcoesTransporte): Transporte {
    * não é transiente > transiente. Todos os códigos ficam em `codigos`.
    */
   function erroDePost(status: number, texto: string, tipo: 'emissao' | 'evento'): Resposta {
-    if (status < 400) return porStatus(status, texto)
+    if (status < 400) return semCodigo(status)
     const { codigos, mensagens } = extrairErros(lerJson(texto))
+    // E0014 em qualquer lugar do texto (envelope que a extração não conhece) ainda é duplicidade.
+    if (tipo === 'emissao' && !codigos.includes(COD_DUPLICIDADE) && /\bE0014\b/i.test(texto)) codigos.push(COD_DUPLICIDADE)
     let classe: Classe
     if (tipo === 'emissao' && codigos.includes(COD_DUPLICIDADE)) classe = 'duplicidade'
     else if (tipo === 'evento' && codigos.some((c) => COD_EVENTO_JA_REGISTRADO.has(c))) classe = 'evento-ja-registrado'
     else if (codigos.length > 0) classe = codigos.every((c) => COD_TRANSIENTES.has(c)) ? 'transiente' : 'rejeitada'
-    else classe = status >= 500 ? 'transiente' : 'rejeitada'
-    const r: Resposta = { status, classe, codigos, mensagens }
-    if (codigos.length === 0) r.motivo = `status HTTP ${status} sem código de erro legível`
-    return r
+    else return semCodigo(status)
+    return { status, classe, codigos, mensagens }
   }
 
-  /** Sucesso com XML: JSON com o XML em gzip+base64 (hipótese) ou o XML puro no corpo. */
-  function comXml(status: number, texto: string, classe: Classe): Resposta {
-    const corpo = lerJson(texto)
+  /** 2xx que não prova o estado final: transiente, com os códigos que houver e um motivo. */
+  function duvida(status: number, texto: string, motivo: string): Resposta {
+    const { codigos, mensagens } = extrairErros(lerJson(texto))
+    return { status, classe: 'transiente', codigos, mensagens, motivo }
+  }
+
+  /**
+   * 2xx com XML: JSON com o XML em gzip+base64 (hipótese) ou o XML puro no corpo. O estado final
+   * só sai se o XML tem a raiz esperada; senão `transiente`.
+   */
+  function comXml(status: number, texto: string, classe: Classe, campoXml: string, raiz: RegExp, nomeRaiz: string): Resposta {
     try {
+      const corpo = lerJson(texto)
+      let xml: string | undefined
+      let chave: unknown
       if (eObjeto(corpo)) {
-        const r = vazia(status, classe)
-        const x = corpo[CAMPO_NFSE_RESPOSTA]
-        if (typeof x === 'string') r.xml = descompactar(x)
-        const c = corpo[CAMPO_CHAVE_RESPOSTA] ?? corpo.ChaveAcesso
-        if (typeof c === 'string') r.chave = c
-        return r
+        const x = corpo[campoXml]
+        if (typeof x === 'string') xml = descompactar(x)
+        chave = corpo[CAMPO_CHAVE_RESPOSTA] ?? corpo.ChaveAcesso
+      } else if (texto.trimStart().startsWith('<') || texto.startsWith('﻿')) {
+        xml = texto
       }
+      if (xml === undefined || !raiz.test(xml.replace(/^﻿/, ''))) return duvida(status, texto, `2xx sem o XML esperado (raiz ${nomeRaiz})`)
+      if (chave !== undefined && !chaveValida(chave, ambiente)) return duvida(status, texto, 'chave de acesso da resposta fora do formato')
+      return { ...vazia(status, classe), xml, ...(typeof chave === 'string' ? { chave } : {}) }
     } catch (e) {
+      if (e instanceof Excedeu) return duvida(status, '', e.message)
       return vazia(status, 'falha', `corpo 2xx ilegível: ${motivoDe(e)}`)
     }
-    if (texto.trimStart().startsWith('<')) return { ...vazia(status, classe), xml: texto }
-    // 2xx ilegível: a nota pode existir; transiente manda o chamador reconciliar por existeDps.
-    return vazia(status, 'transiente', 'corpo da resposta não é JSON nem XML')
+  }
+
+  async function lerCorpo(res: Dispatcher.ResponseData): Promise<{ texto: string; excedeu: boolean }> {
+    const partes: Buffer[] = []
+    let total = 0
+    for await (const parte of res.body) {
+      const b = Buffer.isBuffer(parte) ? parte : Buffer.from(parte as Uint8Array)
+      total += b.length
+      if (total > TETO_BYTES) {
+        res.body.destroy()
+        return { texto: '', excedeu: true }
+      }
+      partes.push(b)
+    }
+    return { texto: Buffer.concat(partes).toString('utf8'), excedeu: false }
   }
 
   async function enviar(
     metodo: 'GET' | 'HEAD' | 'POST', caminho: string, corpo?: string,
-  ): Promise<{ status: number; texto: string }> {
+  ): Promise<{ status: number; texto: string; excedeu: boolean }> {
     const res = await request(base() + caminho, {
       method: metodo,
       dispatcher: dispatcher(),
@@ -245,12 +338,15 @@ export function criarTransporte(o: OpcoesTransporte): Transporte {
       headers: { accept: 'application/json', ...(corpo !== undefined ? { 'content-type': 'application/json' } : {}) },
       ...(corpo !== undefined ? { body: corpo } : {}),
     })
-    return { status: res.statusCode, texto: await res.body.text() }
+    return { status: res.statusCode, ...(await lerCorpo(res)) }
   }
 
   /** Converte qualquer exceção em `Resposta`: o transporte nunca lança. */
   async function seguro<T extends Resposta>(f: () => Promise<T | Resposta>): Promise<T | Resposta> {
     try {
+      if (fechado) return vazia(0, 'falha', 'transporte fechado')
+      const erro = erroDeConfig()
+      if (erro) return vazia(0, 'falha', erro)
       return await f()
     } catch (e) {
       return vazia(0, 'falha', e instanceof Recusa ? e.message : motivoDe(e))
@@ -258,12 +354,14 @@ export function criarTransporte(o: OpcoesTransporte): Transporte {
   }
 
   const ok = (status: number) => status >= 200 && status < 300
+  const acimaDoTeto = (status: number) => vazia(status, 'transiente', 'corpo da resposta acima do teto de tamanho')
 
   return {
     emitir: (dpsAssinada) => seguro(async () => {
       if (typeof dpsAssinada !== 'string') throw new Recusa('dpsAssinada deve ser texto')
-      const { status, texto } = await enviar('POST', '/nfse', JSON.stringify({ [CAMPO_DPS]: gzipB64(dpsAssinada) }))
-      return ok(status) ? comXml(status, texto, 'autorizada') : erroDePost(status, texto, 'emissao')
+      const { status, texto, excedeu } = await enviar('POST', '/nfse', JSON.stringify({ [CAMPO_DPS]: gzipB64(dpsAssinada) }))
+      if (ok(status)) return excedeu ? acimaDoTeto(status) : comXml(status, texto, 'autorizada', CAMPO_NFSE_RESPOSTA, RAIZ_NFSE, 'NFSe')
+      return erroDePost(status, texto, 'emissao')
     }),
 
     existeDps: (idDps) => seguro(async () => {
@@ -273,42 +371,49 @@ export function criarTransporte(o: OpcoesTransporte): Transporte {
     }),
 
     chaveDaDps: (idDps) => seguro(async () => {
-      const { status, texto } = await enviar('GET', `/dps/${validarIdDps(idDps)}`)
+      const { status, texto, excedeu } = await enviar('GET', `/dps/${validarIdDps(idDps)}`)
       if (ok(status)) {
+        if (excedeu) return acimaDoTeto(status)
         const corpo = lerJson(texto)
         const c = eObjeto(corpo) ? (corpo[CAMPO_CHAVE_RESPOSTA] ?? corpo.ChaveAcesso) : undefined
-        return typeof c === 'string'
+        return chaveValida(c, ambiente)
           ? { ...vazia(status, 'encontrada'), chave: c }
-          : vazia(status, 'transiente', 'resposta sem chave de acesso legível')
+          : vazia(status, 'transiente', 'resposta sem chave de acesso válida')
       }
       return status === 404 ? vazia(status, 'nao-encontrada') : porStatus(status, texto)
     }),
 
     nfse: (chave) => seguro(async () => {
-      const { status, texto } = await enviar('GET', `/nfse/${validarChave(chave)}`)
-      if (ok(status)) {
-        const r = comXml(status, texto, 'encontrada')
-        return r.classe === 'encontrada' && r.xml === undefined ? vazia(status, 'transiente', 'resposta sem XML da NFS-e') : r
-      }
+      const { status, texto, excedeu } = await enviar('GET', `/nfse/${validarChave(chave)}`)
+      if (ok(status)) return excedeu ? acimaDoTeto(status) : comXml(status, texto, 'encontrada', CAMPO_NFSE_RESPOSTA, RAIZ_NFSE, 'NFSe')
       return status === 404 ? vazia(status, 'nao-encontrada') : porStatus(status, texto)
     }),
 
     registrarEvento: (chave, pedidoAssinado) => seguro(async () => {
       const c = validarChave(chave)
       if (typeof pedidoAssinado !== 'string') throw new Recusa('pedidoAssinado deve ser texto')
-      const { status, texto } = await enviar('POST', `/nfse/${c}/eventos`, JSON.stringify({ [CAMPO_EVENTO]: gzipB64(pedidoAssinado) }))
-      return ok(status) ? vazia(status, 'evento-registrado') : erroDePost(status, texto, 'evento')
+      const { status, texto, excedeu } = await enviar('POST', `/nfse/${c}/eventos`, JSON.stringify({ [CAMPO_EVENTO]: gzipB64(pedidoAssinado) }))
+      if (ok(status)) {
+        return excedeu ? acimaDoTeto(status) : comXml(status, texto, 'evento-registrado', CAMPO_EVENTO_RESPOSTA, RAIZ_EVENTO, 'evento')
+      }
+      return erroDePost(status, texto, 'evento')
     }),
 
     eventos: (chave) => seguro(async () => {
-      const { status, texto } = await enviar('GET', `/nfse/${validarChave(chave)}/eventos`)
+      const { status, texto, excedeu } = await enviar('GET', `/nfse/${validarChave(chave)}/eventos`)
       if (ok(status)) {
+        if (excedeu) return acimaDoTeto(status)
         const corpo = lerJson(texto)
         const lista = eObjeto(corpo) && Array.isArray(corpo.eventos) ? corpo.eventos : []
         const eventosXml: string[] = []
-        for (const ev of lista) {
-          const campo = eObjeto(ev) ? Object.entries(ev).find(([k, v]) => /XmlGZipB64$/i.test(k) && typeof v === 'string') : undefined
-          if (campo) eventosXml.push(descompactar(campo[1] as string))
+        try {
+          for (const ev of lista) {
+            const campo = eObjeto(ev) ? Object.entries(ev).find(([k, v]) => /XmlGZipB64$/i.test(k) && typeof v === 'string') : undefined
+            if (campo) eventosXml.push(descompactar(campo[1] as string))
+          }
+        } catch (e) {
+          if (e instanceof Excedeu) return vazia(status, 'transiente', e.message)
+          throw e
         }
         return { ...vazia(status, 'encontrada'), eventosXml }
       }
@@ -316,6 +421,7 @@ export function criarTransporte(o: OpcoesTransporte): Transporte {
     }),
 
     fechar: async () => {
+      fechado = true
       const a = agentProprio
       agentProprio = undefined
       try { await a?.close() } catch { /* nada a fechar */ }

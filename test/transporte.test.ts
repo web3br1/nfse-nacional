@@ -14,6 +14,7 @@ const ID_DPS = 'DPS355030821234567800019000001000000000000001' // 45 caracteres
 const ID_DPS_LETRA = 'DPS3550308212ABC34500019500001000000000000001' // CNPJ com letra, tpInsc 2
 const CHAVE_50 = '12345678' + '123456789012345' + '678901234567890123456789012' // tpInsc 1 na posição 9
 const XML_NFSE = '<NFSe xmlns="http://www.sped.fazenda.gov.br/nfse"><infNFSe/></NFSe>'
+const XML_EVENTO = '<evento versao="1.01"><infEvento/></evento>'
 const JSON_H = { headers: { 'content-type': 'application/json' } }
 
 let certPem = ''
@@ -155,7 +156,8 @@ describe('classificação do POST /nfse', () => {
 
   it.each([
     [301, 'falha'], [302, 'falha'], [307, 'falha'],
-    [400, 'rejeitada'], [401, 'rejeitada'], [403, 'rejeitada'], [404, 'rejeitada'], [413, 'rejeitada'], [422, 'rejeitada'],
+    [400, 'falha'], [401, 'falha'], [403, 'falha'], [404, 'falha'], [413, 'falha'], [422, 'falha'],
+    [408, 'transiente'], [429, 'transiente'],
     [500, 'transiente'], [502, 'transiente'], [504, 'transiente'],
   ])('status %i sem código legível (corpo não JSON) → %s, com o status no motivo', async (status, classe) => {
     const { pool, t, caminho } = mock()
@@ -166,12 +168,12 @@ describe('classificação do POST /nfse', () => {
     expect(r.motivo).toContain(String(status))
   })
 
-  it('400 com JSON sem nenhum código → rejeitada com o status no motivo', async () => {
+  it('400 com JSON sem nenhum código → falha (rejeitada exige código), com o status no motivo', async () => {
     const { pool, t, caminho } = mock()
     pool.intercept({ path: caminho('/nfse'), method: 'POST' })
       .reply(400, JSON.stringify({ erros: [{ descricao: 'sem código' }] }), JSON_H)
     const r = await t.emitir('<DPS/>')
-    expect(r).toMatchObject({ classe: 'rejeitada', codigos: [] })
+    expect(r).toMatchObject({ classe: 'falha', codigos: [] })
     expect(r.motivo).toContain('400')
   })
 
@@ -210,9 +212,9 @@ describe('eventos', () => {
   it('201 → evento-registrado; o corpo carrega CAMPO_EVENTO em gzip + base64', async () => {
     const { pool, t, caminho } = mock()
     let corpo = ''
-    pool.intercept({ path: caminho(rota), method: 'POST', body: (b) => { corpo = String(b); return true } }).reply(201, '{}', JSON_H)
+    pool.intercept({ path: caminho(rota), method: 'POST', body: (b) => { corpo = String(b); return true } }).reply(201, JSON.stringify({ eventoXmlGZipB64: b64gz(XML_EVENTO) }), JSON_H)
     const r = await t.registrarEvento(CHAVE_50, '<pedRegEvento/>')
-    expect(r).toMatchObject({ status: 201, classe: 'evento-registrado' })
+    expect(r).toMatchObject({ status: 201, classe: 'evento-registrado', xml: XML_EVENTO })
     const json = JSON.parse(corpo) as Record<string, string>
     expect(Object.keys(json)).toEqual([CAMPO_EVENTO])
     expect(gunzipSync(Buffer.from(json[CAMPO_EVENTO]!, 'base64')).toString('utf8')).toBe('<pedRegEvento/>')
@@ -297,13 +299,13 @@ describe('consultas', () => {
     expect(await t.nfse(CHAVE_50)).toMatchObject({ classe: 'encontrada', xml: XML_NFSE })
   })
 
-  it('HEAD com 503 → transiente; com 403 → rejeitada', async () => {
+  it('HEAD com 503 → transiente; com 403 sem código → falha', async () => {
     const a = mock()
     a.pool.intercept({ path: a.caminho(`/dps/${ID_DPS}`), method: 'HEAD' }).reply(503, '')
     expect((await a.t.existeDps(ID_DPS)).classe).toBe('transiente')
     const b = mock()
     b.pool.intercept({ path: b.caminho(`/dps/${ID_DPS}`), method: 'HEAD' }).reply(403, '')
-    expect((await b.t.existeDps(ID_DPS)).classe).toBe('rejeitada')
+    expect((await b.t.existeDps(ID_DPS)).classe).toBe('falha')
   })
 })
 
@@ -417,8 +419,8 @@ describe('TLS', () => {
     return { baseUrl: `https://127.0.0.1:${(s.address() as AddressInfo).port}`, alpn }
   }
   const responder201 = (_q: IncomingMessage, res: ServerResponse) => {
-    res.writeHead(201, { 'content-type': 'application/json' })
-    res.end('{"chaveAcesso":"x"}')
+    res.writeHead(201, { 'content-type': 'application/xml' })
+    res.end(XML_NFSE)
   }
 
   it('ALPN: mesmo anunciando h2, o servidor vê http/1.1', async () => {
