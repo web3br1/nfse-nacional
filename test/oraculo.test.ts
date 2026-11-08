@@ -131,15 +131,19 @@ describe('oráculo: DPS do pacote × open-nfse@0.11.1 (perfil de produção)', (
   })
 
   it('o texto canônico sem assinatura concorda com a comparação por caminho (segundo caminho de medição)', async () => {
-    let examinadas = 0
+    let examinadas = 0, identicas = 0
     for (const [, e] of casos) {
       const nossa = dpsNossa(e), deles = await dpsDaOpenNfse(e)
       examinadas++
+      const igualCanonico = canonizarSemAssinatura(nossa) === canonizarSemAssinatura(deles)
+      const zeroDiferencas = diferencas(nossa, deles).length === 0
       // canônico idêntico <=> nenhuma diferença por caminho; qualquer divergência entre os dois métodos é defeito do oráculo
-      expect(canonizarSemAssinatura(nossa) === canonizarSemAssinatura(deles)).toBe(diferencas(nossa, deles).length === 0)
+      expect(igualCanonico).toBe(zeroDiferencas)
+      if (igualCanonico && zeroDiferencas) identicas++
     }
     expect(examinadas).toBe(casos.length)
-    expect(examinadas).toBeGreaterThan(0)
+    // sem ao menos uma fixture idêntica o lado "idêntico" nunca é exercitado (false === false)
+    expect(identicas).toBeGreaterThan(0)
   })
 
   it('toda diferença aceita ainda acontece em alguma fixture', async () => {

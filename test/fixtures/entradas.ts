@@ -64,6 +64,18 @@ export const entradas: Record<string, EntradaDps> = {
     serv: { cLocPrestacao: '3550308', cTribNac: '070201', xDescServ: 'Limpeza <filtro> & "casa de maquinas"' },
   },
   'fuso fora de Brasilia': { ...base, nDPS: 12, dhEmi: '2026-11-07T10:00:00-04:00' },
+  // Sem nenhuma diferença aceita: centavos não nulos (as duas emitem duas casas) e dhEmi em -03:00.
+  // É a que exercita o lado "idêntico" do oráculo.
+  'centavos nao nulos, sem diferenca aceita': {
+    ...base,
+    nDPS: 13,
+    valores: {
+      vServ: 150.37,
+      tribMun: { tribISSQN: 1, tpRetISSQN: 1 },
+      tribFed: { vRetIRRF: 20.37 },
+      totTrib: { pTotTribSN: 4.5 },
+    },
+  },
 }
 
 /** Instante e data de competência como `Date`, sem depender do fuso da máquina. */
@@ -82,6 +94,10 @@ const endereco = (e: NonNullable<EntradaDps['toma']>['end']) =>
 
 /** Traduz a entrada do pacote para o `DPS` da open-nfse (`buildDpsXml`). `verAplic` fixo = versão do pacote. */
 export function paraOpenNfse(e: EntradaDps): any {
+  // Forma de obra sem tradução: lançar em vez de traduzir em silêncio para um cObra indefinido.
+  if (e.serv.obra && (e.serv.obra.cObra === undefined || e.serv.obra.cCIB !== undefined || e.serv.obra.end !== undefined)) {
+    throw new Error('paraOpenNfse: só serv.obra.cObra está mapeado (cCIB e obra.end não)')
+  }
   const inscricao = e.prest.CNPJ ?? e.prest.CPF!
   return {
     versao: '1.01',
