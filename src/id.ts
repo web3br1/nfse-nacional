@@ -16,12 +16,18 @@ export interface ParamsIdPedidoEvento {
 
 const SERIE_MAX = 49999
 
+export interface OpcoesIdDps {
+  /** CNPJ com letra (`[0-9A-Z]{14}`, só com tpInsc 2): perfil `producao-restrita` (G0 Q4 (a)). Padrão: só dígitos. */
+  cnpjAlfanumerico?: boolean
+}
+
 /** Id da DPS: `DPS` + IBGE(7) + tpInsc(1) + inscrição(14) + série(5) + nDPS(15) = 45. */
-export function idDps(p: ParamsIdDps): string {
+export function idDps(p: ParamsIdDps, opcoes: OpcoesIdDps = {}): string {
   if (!/^\d{7}$/.test(p.cMun)) throw new RangeError('cMun deve ter 7 dígitos')
   if (p.tpInsc !== 1 && p.tpInsc !== 2) throw new RangeError('tpInsc deve ser 1 (CPF) ou 2 (CNPJ)')
   const tamanho = p.tpInsc === 1 ? 11 : 14
-  if (!new RegExp(`^\\d{${tamanho}}$`).test(p.inscricao)) {
+  const classe = p.tpInsc === 2 && opcoes.cnpjAlfanumerico ? '[0-9A-Z]' : '\\d'
+  if (!new RegExp(`^${classe}{${tamanho}}$`).test(p.inscricao)) {
     throw new RangeError(`inscricao deve ter ${tamanho} dígitos para tpInsc ${p.tpInsc}`)
   }
   if (!Number.isInteger(p.serie) || p.serie < 1 || p.serie > SERIE_MAX) {
