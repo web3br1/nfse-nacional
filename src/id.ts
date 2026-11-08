@@ -39,9 +39,20 @@ export function idDps(p: ParamsIdDps, opcoes: OpcoesIdDps = {}): string {
   return `DPS${p.cMun}${p.tpInsc}${p.inscricao.padStart(14, '0')}${String(p.serie).padStart(5, '0')}${String(p.nDPS).padStart(15, '0')}`
 }
 
-/** Id do pedido de evento: `PRE` + chave(50) + tipo(6) = 59. */
-export function idPedidoEvento(p: ParamsIdPedidoEvento): string {
-  if (!/^\d{50}$/.test(p.chave)) throw new RangeError('chave deve ter 50 dígitos')
+export interface OpcoesIdPedidoEvento {
+  /** Chave com letra no CNPJ (perfil `producao-restrita`): admite o que o TSIdPedRegEvt da restrita admite. Padrão: só dígitos. */
+  chaveAlfanumerica?: boolean
+}
+
+// TSIdPedRegEvt da restrita, sem o "PRE" e sem o tipo: 8 dígitos, tpInsc 1 + 14 dígitos ou tpInsc 2 + 14 de 0-9A-Z, 27 dígitos.
+const CHAVE_ID_ALFANUMERICA = /^\d{8}(?:1\d{14}|2[0-9A-Z]{14})\d{27}$/
+
+/** Id do pedido de evento:`PRE` + chave(50) + tipo(6) = 59. */
+export function idPedidoEvento(p: ParamsIdPedidoEvento, opcoes: OpcoesIdPedidoEvento = {}): string {
+  const chaveOk = opcoes.chaveAlfanumerica ? CHAVE_ID_ALFANUMERICA.test(p.chave) : /^\d{50}$/.test(p.chave)
+  if (!chaveOk) {
+    throw new RangeError(opcoes.chaveAlfanumerica ? 'chave deve ter 50 caracteres no padrão do Id da restrita' : 'chave deve ter 50 dígitos')
+  }
   if (!/^\d{6}$/.test(p.tipo)) throw new RangeError('tipo deve ter 6 dígitos')
   return `PRE${p.chave}${p.tipo}`
 }

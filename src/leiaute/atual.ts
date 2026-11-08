@@ -1,5 +1,6 @@
 import type { Ambiente, EntradaDps } from '../entrada.js'
 import { montarDpsV101, type ResultadoDps } from './v1-01/dps.js'
+import { montarPedidoCancelamentoV101, type PedidoCancelamento, type ResultadoEvento } from './v1-01/evento.js'
 
 export const LEIAUTE_ATUAL = 'v1-01'
 export type VersaoLeiaute = 'v1-01'
@@ -17,4 +18,10 @@ export function montarDps(
   const versao = opcoes.versao ?? LEIAUTE_ATUAL
   if (versao !== 'v1-01') return { ok: false, motivos: [`versao: leiaute ${String(versao)} não existe`] }
   return montarDpsV101(entrada, opcoes.ambiente)
+}
+
+export function montarPedidoCancelamento(p: PedidoCancelamento, opcoes: { versao?: VersaoLeiaute } = {}): ResultadoEvento {
+  const versao = opcoes.versao ?? LEIAUTE_ATUAL
+  if (versao !== 'v1-01') return { ok: false, motivos: [`versao: leiaute ${String(versao)} não existe`] }
+  return montarPedidoCancelamentoV101(p)
 }
