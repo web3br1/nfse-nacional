@@ -5,7 +5,7 @@
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "exports": {
     ".": {
@@ -18,9 +18,13 @@
     "xsd"
   ],
   "scripts": {
+    "gerar-versao": "node scripts/gerar-versao.mjs",
+    "prebuild": "npm run gerar-versao",
     "build": "tsc -p tsconfig.json",
     "prepare": "npm run build",
+    "pretest": "npm run gerar-versao",
     "test": "vitest run",
+    "pretypecheck": "npm run gerar-versao",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
