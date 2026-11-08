@@ -4,3 +4,4 @@ export { montarDps, montarPedidoCancelamento, LEIAUTE_ATUAL, XSD_DO_AMBIENTE, ty
 export type { ResultadoDps } from './leiaute/v1-01/dps.js'
 export type { PedidoCancelamento, ResultadoEvento } from './leiaute/v1-01/evento.js'
 export { VERSAO_PACOTE } from './versao.js'
+export { ALGORITMO_ASSINATURA, assinarXml, verificarAssinatura, lerXml, canonizar } from './assinar.js'

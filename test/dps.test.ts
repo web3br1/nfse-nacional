@@ -5,34 +5,13 @@ import { readdirSync, readFileSync } from 'node:fs'
 import * as pacote from '../src/index.js'
 import { montarDps as montarDpsPuro, XSD_DO_AMBIENTE } from '../src/leiaute/atual.js'
 import { validarNoXsd, type ConjuntoXsd } from './xsd.js'
+import { entradaBase } from './fixtures.js'
 
 // A fixture deriva o tpAmb do perfil (producao = 1, producao-restrita = 2, T0.1 item 7); os testes de tpAmb usam montarDpsPuro.
 const montarDps: typeof montarDpsPuro = (e, o) => montarDpsPuro({ ...e, tpAmb: o.ambiente === 'producao' ? 1 : 2 }, o)
 
 const P = { ambiente: 'producao' } as const
 const R = { ambiente: 'producao-restrita' } as const
-
-// Fixture sintética: nenhum dado real.
-const entradaBase: EntradaDps = {
-  tpAmb: 2,
-  dhEmi: '2026-11-07T10:00:00-03:00',
-  serie: 1,
-  nDPS: 1,
-  dCompet: '2026-11-07',
-  cLocEmi: '3550308',
-  prest: { CNPJ: '12345678000195', IM: '12345', regTrib: { opSimpNac: 3, regApTribSN: 1, regEspTrib: 0 } },
-  toma: {
-    CPF: '12345678909',
-    xNome: 'Cliente Sintetico',
-    end: { cMun: '3550308', CEP: '01001000', xLgr: 'Rua Exemplo', nro: '100', xBairro: 'Centro' },
-  },
-  serv: { cLocPrestacao: '3550308', cTribNac: '070201', xDescServ: 'Manutencao de piscina' },
-  valores: {
-    vServ: 150,
-    tribMun: { tribISSQN: 1, tpRetISSQN: 1 },
-    totTrib: { pTotTribSN: 4.5 },
-  },
-}
 
 /** Valida e, como controle negativo, derruba um elemento obrigatório e exige `valido: false`. */
 async function validaEControle(xml: string, c: ConjuntoXsd) {
