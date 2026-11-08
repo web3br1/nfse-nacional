@@ -6,3 +6,6 @@ export type { PedidoCancelamento, ResultadoEvento } from './leiaute/v1-01/evento
 export { VERSAO_PACOTE } from './versao.js'
 export { ALGORITMO_ASSINATURA, assinarXml, verificarAssinatura, lerXml, canonizar } from './assinar.js'
 export { criarTransporte, type OpcoesTransporte, type Transporte, type Resposta, type Classe } from './transporte.js'
+export { lerNfse, type ResultadoNfse } from './ler-nfse.js'
+export { lerEvento, type ResultadoEvento as ResultadoLeituraEvento } from './ler-evento.js'
+export { lerCertificado, type ResultadoCertificado } from './certificado.js'
