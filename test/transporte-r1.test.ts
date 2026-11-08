@@ -110,10 +110,10 @@ describe('R1.3 E0014 não escapa', () => {
     expect((await t.emitir('<DPS/>')).classe).toBe('duplicidade')
   })
 
-  it('código numérico não derruba a extração: vira texto, e a classe é rejeitada', async () => {
+  it('código numérico não derruba a extração, mas não é código: 400 vira falha (R2.2)', async () => {
     const { pool, t, caminho } = mock()
     pool.intercept({ path: caminho('/nfse'), method: 'POST' }).reply(400, JSON.stringify({ erros: [{ codigo: 14 }] }), JSON_H)
-    expect(await t.emitir('<DPS/>')).toMatchObject({ classe: 'rejeitada', codigos: ['14'] })
+    expect(await t.emitir('<DPS/>')).toMatchObject({ classe: 'falha', codigos: [], mensagens: ['14'] })
   })
 
   it('código com minúscula é normalizado em evento também', async () => {

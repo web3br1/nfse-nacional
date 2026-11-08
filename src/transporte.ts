@@ -113,6 +113,8 @@ function lerJson(texto: string): unknown {
   try { return JSON.parse(texto) } catch { return undefined }
 }
 
+/** Código de erro da Sefin: letra e 4 dígitos (todos os da T0.1 são E + 4 dígitos). */
+const PADRAO_CODIGO = /^[A-Z]\d{4}$/
 const normalizar = (c: unknown): string => String(c).trim().toUpperCase()
 
 /** `erros` ou `erro`, em lista ou objeto, camelCase ou PascalCase; une sem duplicar (G0 Q2). */
@@ -128,6 +130,10 @@ function extrairErros(corpo: unknown): { codigos: string[]; mensagens: string[] 
       const bruto = [it.codigo, it.Codigo].find((c) => (typeof c === 'string' && c.trim() !== '') || typeof c === 'number')
       if (bruto === undefined) continue
       const cod = normalizar(bruto)
+      if (!PADRAO_CODIGO.test(cod)) {
+        mensagens.push(String(bruto)) // fora do padrão da Sefin: não classifica, só informa
+        continue
+      }
       if (!codigos.includes(cod)) {
         codigos.push(cod)
         const desc = it.descricao || it.Descricao
@@ -251,15 +257,15 @@ export function criarTransporte(entrada: OpcoesTransporte): Transporte {
    * Status sem semântica própria, sem código legível: 3xx falha; 408/429 e 5xx transiente;
    * demais 4xx falha (rejeitada exige código).
    */
-  function semCodigo(status: number): Resposta {
+  function semCodigo(status: number, mensagens: string[] = []): Resposta {
     const classe: Classe = status >= 500 || status === 408 || status === 429 ? 'transiente' : 'falha'
-    return vazia(status, classe, `status HTTP ${status} sem código de erro legível`)
+    return { ...vazia(status, classe, `status HTTP ${status} sem código de erro legível`), mensagens }
   }
 
   /** Resposta não 2xx de GET/HEAD. */
   function porStatus(status: number, texto: string): Resposta {
     const { codigos, mensagens } = extrairErros(lerJson(texto))
-    if (codigos.length === 0 || status < 400) return semCodigo(status)
+    if (codigos.length === 0 || status < 400) return semCodigo(status, mensagens)
     const classe: Classe = status >= 500 || status === 408 || status === 429 ? 'transiente' : 'rejeitada'
     return { status, classe, codigos, mensagens }
   }
@@ -273,12 +279,13 @@ export function criarTransporte(entrada: OpcoesTransporte): Transporte {
     if (status < 400) return semCodigo(status)
     const { codigos, mensagens } = extrairErros(lerJson(texto))
     // E0014 em qualquer lugar do texto (envelope que a extração não conhece) ainda é duplicidade.
-    if (tipo === 'emissao' && !codigos.includes(COD_DUPLICIDADE) && /\bE0014\b/i.test(texto)) codigos.push(COD_DUPLICIDADE)
+    if (tipo === 'emissao' && codigos.length === 0 && /\bE0014\b/i.test(texto)) codigos.push(COD_DUPLICIDADE)
     let classe: Classe
     if (tipo === 'emissao' && codigos.includes(COD_DUPLICIDADE)) classe = 'duplicidade'
     else if (tipo === 'evento' && codigos.some((c) => COD_EVENTO_JA_REGISTRADO.has(c))) classe = 'evento-ja-registrado'
+    else if (codigos.length > 0 && (status >= 500 || status === 408 || status === 429)) classe = 'transiente'
     else if (codigos.length > 0) classe = codigos.every((c) => COD_TRANSIENTES.has(c)) ? 'transiente' : 'rejeitada'
-    else return semCodigo(status)
+    else return semCodigo(status, mensagens)
     return { status, classe, codigos, mensagens }
   }
 
@@ -404,12 +411,14 @@ export function criarTransporte(entrada: OpcoesTransporte): Transporte {
       if (ok(status)) {
         if (excedeu) return acimaDoTeto(status)
         const corpo = lerJson(texto)
-        const lista = eObjeto(corpo) && Array.isArray(corpo.eventos) ? corpo.eventos : []
+        if (!eObjeto(corpo) || !Array.isArray(corpo.eventos)) return vazia(status, 'transiente', 'resposta sem a lista de eventos')
         const eventosXml: string[] = []
         try {
-          for (const ev of lista) {
+          for (const ev of corpo.eventos) {
             const campo = eObjeto(ev) ? Object.entries(ev).find(([k, v]) => /XmlGZipB64$/i.test(k) && typeof v === 'string') : undefined
-            if (campo) eventosXml.push(descompactar(campo[1] as string))
+            const xml = campo ? descompactar(campo[1] as string) : undefined
+            if (xml === undefined || !RAIZ_EVENTO.test(xml)) return vazia(status, 'transiente', 'item da lista sem XML de evento (raiz evento)')
+            eventosXml.push(xml)
           }
         } catch (e) {
           if (e instanceof Excedeu) return vazia(status, 'transiente', e.message)
