@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { idDps, type EntradaDps } from '../src/index.js'
-import { montarDps, XSD_DO_AMBIENTE } from '../src/leiaute/atual.js'
+import { createHash } from 'node:crypto'
+import { readdirSync, readFileSync } from 'node:fs'
+import * as pacote from '../src/index.js'
+import { montarDps as montarDpsPuro, XSD_DO_AMBIENTE } from '../src/leiaute/atual.js'
 import { validarNoXsd, type ConjuntoXsd } from './xsd.js'
+
+// A fixture deriva o tpAmb do perfil (producao = 1, producao-restrita = 2, T0.1 item 7); os testes de tpAmb usam montarDpsPuro.
+const montarDps: typeof montarDpsPuro = (e, o) => montarDpsPuro({ ...e, tpAmb: o.ambiente === 'producao' ? 1 : 2 }, o)
 
 const P = { ambiente: 'producao' } as const
 const R = { ambiente: 'producao-restrita' } as const
@@ -294,8 +300,83 @@ describe('ordem de cServ difere entre os XSD (quinto ponto, fora do item 8 da T0
 })
 
 describe('arredondamento em centavos', () => {
-  it.each([[0.29, '0.29'], [19.99, '19.99'], [1.005 + 0.001, '1.01'], [150, '150.00'], [0, '0.00']])('vServ %s sai %s', (entrada, saida) => {
+  it.each([[0.29, '0.29'], [19.99, '19.99'], [0.1 + 0.2, '0.30'], [150, '150.00'], [0, '0.00']])('vServ %s sai %s', (entrada, saida) => {
     const r = montarDps({ ...entradaBase, valores: { ...entradaBase.valores, vServ: entrada } }, P) as any
     expect(r.xml).toContain(`<vServ>${saida}</vServ>`)
+  })
+})
+
+describe('rodada 1', () => {
+  const bruto = (e: EntradaDps, o: typeof P | typeof R) => montarDpsPuro(e, o)
+
+  it('tpAmb diferente do ambiente volta motivo nomeando tpAmb, nas duas direções (T0.1 item 7)', () => {
+    expect(bruto({ ...entradaBase, tpAmb: 1 }, R)).toEqual({ ok: false, motivos: [expect.stringContaining('tpAmb')] })
+    expect(bruto({ ...entradaBase, tpAmb: 2 }, P)).toEqual({ ok: false, motivos: [expect.stringContaining('tpAmb')] })
+    expect(bruto({ ...entradaBase, tpAmb: 1 }, P).ok).toBe(true)
+    expect(bruto({ ...entradaBase, tpAmb: 2 }, R).ok).toBe(true)
+  })
+
+  it('o perfil de produção com tpAmb 1 valida no XSD de produção', async () => {
+    const r = bruto({ ...entradaBase, tpAmb: 1 }, P) as any
+    expect(r.xml).toContain('<tpAmb>1</tpAmb>')
+    await validaEControle(r.xml, 'v1.01-20260209')
+  })
+
+  it('cCIB passa pelo escape e pelo controle de caractere', () => {
+    const e = (cCIB: string) => ({ ...entradaBase, serv: { ...entradaBase.serv, obra: { cCIB } } })
+    const r = montarDps(e('<x/>&a"b'), P) as any
+    expect(r.ok).toBe(true)
+    expect(r.xml).toContain('<cCIB>&lt;x/&gt;&amp;a&quot;b</cCIB>')
+    expect(montarDps(e('1234567\u0001'), P)).toEqual({ ok: false, motivos: [expect.stringContaining('serv.obra.cCIB')] })
+    expect(montarDps(e('123'), P)).toEqual({ ok: false, motivos: [expect.stringContaining('serv.obra.cCIB')] })
+  })
+
+  it('cCIB com & valida no XSD', async () => {
+    await validaEControle(xmlDe({ ...entradaBase, serv: { ...entradaBase.serv, obra: { cCIB: 'A&B12345' } } }, P), 'v1.01-20260209')
+  })
+
+  it.each([1.005, 2.675, 1.255])('fração real de centavo (%s) volta motivo nomeando o campo, sem arredondar', (v) => {
+    expect(montarDps({ ...entradaBase, valores: { ...entradaBase.valores, vServ: v } }, P)).toEqual({
+      ok: false,
+      motivos: [expect.stringContaining('valores.vServ')],
+    })
+    expect(
+      montarDps({ ...entradaBase, valores: { ...entradaBase.valores, tribFed: { vRetCP: v } } }, R),
+    ).toEqual({ ok: false, motivos: [expect.stringContaining('valores.tribFed.vRetCP')] })
+  })
+
+  it('ruído binário (0.1 + 0.2) segue saindo 0.30', () => {
+    expect((montarDps({ ...entradaBase, valores: { ...entradaBase.valores, vServ: 0.1 + 0.2 } }, P) as any).xml).toContain('<vServ>0.30</vServ>')
+  })
+
+  it('ambiente desconhecido volta motivo nomeando ambiente, não cai na produção', () => {
+    expect(montarDpsPuro(entradaBase, { ambiente: 'homologacao' as any })).toEqual({ ok: false, motivos: [expect.stringContaining('ambiente')] })
+    expect(montarDpsPuro(entradaBase, {} as any)).toEqual({ ok: false, motivos: [expect.stringContaining('ambiente')] })
+  })
+
+  it('surrogate solto volta motivo nomeando o campo', () => {
+    expect(montarDps({ ...entradaBase, serv: { ...entradaBase.serv, xDescServ: 'a\uD800b' } }, P)).toEqual({
+      ok: false,
+      motivos: [expect.stringContaining('serv.xDescServ')],
+    })
+    expect(montarDps({ ...entradaBase, serv: { ...entradaBase.serv, xDescServ: 'ok 😀' } }, P).ok).toBe(true)
+  })
+
+  it.each(['v1.01-20260209', 'PRODREST-v1.01-20261020'])('FONTE.md de %s lista o sha256 de cada .xsd e bate com o disco', (pasta) => {
+    const dir = new URL(`../xsd/${pasta}/`, import.meta.url)
+    const fonte = readFileSync(new URL('FONTE.md', dir), 'utf8')
+    const xsds = readdirSync(dir).filter((n) => n.endsWith('.xsd'))
+    expect(xsds.length).toBe(10)
+    for (const n of xsds) {
+      const sha = createHash('sha256').update(readFileSync(new URL(n, dir))).digest('hex')
+      expect(fonte, n).toContain(`\`${sha}\` ${n}`)
+    }
+  })
+
+  it('o índice exporta montarDps, XSD_DO_AMBIENTE e os tipos públicos', () => {
+    expect(typeof pacote.montarDps).toBe('function')
+    expect(pacote.XSD_DO_AMBIENTE.producao).toBe('v1.01-20260209')
+    const t: [pacote.ResultadoDps?, pacote.EntradaDps?, pacote.Ambiente?] = []
+    expect(t).toEqual([])
   })
 })

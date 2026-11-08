@@ -47,6 +47,11 @@ class Validacao {
       this.falha(campo, 'deve ser texto')
       return undefined
     }
+    // isWellFormed é ES2024; Node >= 22.12 tem.
+    if (!(v as unknown as { isWellFormed(): boolean }).isWellFormed()) {
+      this.falha(campo, 'tem surrogate solto (UTF-16 malformado)')
+      return undefined
+    }
     const n = [...v].length
     if (n < (o.min ?? 1) || n > o.max) {
       this.falha(campo, `deve ter de ${o.min ?? 1} a ${o.max} caracteres`)
@@ -102,6 +107,11 @@ class Validacao {
       return undefined
     }
     const centavos = Math.round(v * 100)
+    // O pacote não arredonda dinheiro em silêncio: só o ruído binário (0.1 + 0.2) passa; 1.005 volta motivo.
+    if (Math.abs(v * 100 - centavos) >= 1e-6) {
+      this.falha(campo, 'tem fração de centavo; informe o valor já arredondado em centavos')
+      return undefined
+    }
     if (!Number.isSafeInteger(centavos) || centavos > Math.round(maximo * 100)) {
       this.falha(campo, `deve ser no máximo ${maximo}`)
       return undefined
@@ -167,7 +177,7 @@ function obra(v: Validacao, campo: string, o: Obra): string {
   if (o.cObra !== undefined && o.cObra !== null) {
     escolha = el('cObra', v.texto(`${campo}.cObra`, o.cObra, { max: 30, obrigatorio: true }))
   } else if (o.cCIB !== undefined && o.cCIB !== null) {
-    escolha = el('cCIB', v.padrao(`${campo}.cCIB`, o.cCIB, /^[\s\S]{8}$/u, '8 caracteres'))
+    escolha = el('cCIB', v.texto(`${campo}.cCIB`, o.cCIB, { min: 8, max: 8, obrigatorio: true }))
   } else if (o.end) {
     const e = o.end
     const cep = v.padrao(`${campo}.end.CEP`, e.CEP, /^\d{8}$/, '8 dígitos')
@@ -182,11 +192,15 @@ function obra(v: Validacao, campo: string, o: Obra): string {
 
 export function montarDpsV101(entrada: EntradaDps, ambiente: Ambiente): ResultadoDps {
   const v = new Validacao()
+  if (ambiente !== 'producao' && ambiente !== 'producao-restrita') {
+    return { ok: false, motivos: [`ambiente: deve ser producao ou producao-restrita, veio ${String(ambiente)}`] }
+  }
   const restrita = ambiente === 'producao-restrita'
   const e = entrada as Partial<EntradaDps> | null | undefined
   if (typeof e !== 'object' || e === null) return { ok: false, motivos: ['entrada: obrigatória'] }
 
-  const tpAmb = v.enumeracao('tpAmb', e.tpAmb, [1, 2])
+  // T0.1 item 7 (F8 §2.4.3): produção = 1, produção restrita = 2.
+  const tpAmb = v.enumeracao('tpAmb', e.tpAmb, [restrita ? 2 : 1])
   const dhEmi = typeof e.dhEmi === 'string' && DH_EMI.test(e.dhEmi) ? e.dhEmi : undefined
   if (dhEmi === undefined) v.falha('dhEmi', 'deve ser AAAA-MM-DDThh:mm:ss±hh:00 (sem Z)')
   else v.dataReal('dhEmi', dhEmi.slice(0, 10))
