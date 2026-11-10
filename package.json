@@ -1,6 +1,6 @@
 {
   "name": "nfse-nacional",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Emissor de NFS-e Padrão Nacional: Id, DPS, assinatura, transporte e leitores.",
   "type": "module",
   "license": "MIT",
