@@ -2,6 +2,11 @@ import { describe, it, expect } from 'vitest'
 import { lerNfse } from '../src/ler-nfse.js'
 import { lerEvento } from '../src/ler-evento.js'
 import { CHAVE, nfseCom, eventoCom } from './xml-autorizado.js'
+import { readFileSync } from 'node:fs'
+import { validarNoXsd, type ConjuntoXsd } from './xsd.js'
+
+const CONJUNTOS: ConjuntoXsd[] = ['v1.01-20260209', 'PRODREST-v1.01-20261020']
+const NS_NFSE = 'http://www.sped.fazenda.gov.br/nfse'
 
 const recusa = { ok: false, motivo: expect.any(String) }
 const FORJADA = '3'.repeat(50)
@@ -93,6 +98,32 @@ describe('lerEvento', () => {
   })
   it('21h30 de Brasília no último dia do mês não vira o dia', () => {
     expect(lerEvento(eventoCom({ dhEvento: '2026-11-30T21:30:00-03:00' }))).toMatchObject({ dataEvento: '2026-11-30' })
+  })
+
+  // v0.1.1: o cancelamento por análise fiscal (105104 deferido, 105105 indeferido) vem da Sefin e fecha
+  // ou não a nota; a v0.1.0 recusava os dois com "fora do XSD", e a nota cancelada seguia autorizada.
+  describe.each(CONJUNTOS)('análise fiscal no XSD %s', (conjunto) => {
+    it.each([
+      ['105104', 'Cancelamento de NFS-e Deferido por Análise Fiscal'],
+      ['105105', 'Cancelamento de NFS-e Indeferido por Análise Fiscal'],
+    ])('evento %s válido no XSD é lido com o tipo', async (tipo, xDesc) => {
+      const grupos = `<e${tipo}><xDesc>${xDesc}</xDesc><CPFAgTrib>12345678909</CPFAgTrib><cMotivo>1</cMotivo><xMotivo>Analise fiscal do municipio</xMotivo></e${tipo}>`
+      const xml = eventoCom({ tipo, grupos })
+      const ped = xml.slice(xml.indexOf('<pedRegEvento')).replace(/<\/infEvento>[\s\S]*$/, '').replace('<pedRegEvento ', `<pedRegEvento xmlns="${NS_NFSE}" `)
+      expect(await validarNoXsd(ped, conjunto, 'pedRegEvento')).toEqual({ valido: true, erros: [] })
+      expect(lerEvento(xml)).toEqual({ ok: true, tipo, chave: CHAVE, dhEvento: '2026-11-07T10:00:00-03:00', dataEvento: '2026-11-07' })
+    })
+  })
+
+  // O xs:choice de TCInfPedReg inteiro, lido do próprio XSD: tipo novo no XSD sem o leitor acompanhar reprova.
+  it.each(CONJUNTOS)('todo grupo do xs:choice de TCInfPedReg no XSD %s é aceito', (conjunto) => {
+    const xsd = readFileSync(new URL(`../xsd/${conjunto}/tiposEventos_v1.01.xsd`, import.meta.url), 'utf8')
+    const bloco = xsd.slice(xsd.indexOf('name="TCInfPedReg"'))
+    const escolha = bloco.slice(bloco.lastIndexOf('<xs:choice>', bloco.indexOf('name="e101101"')), bloco.indexOf('</xs:choice>', bloco.indexOf('name="e101101"')))
+    const tipos = [...escolha.matchAll(/<xs:element name="e(\d{6})"/g)].map((m) => m[1])
+    expect(tipos).toHaveLength(16)
+    const recusados = tipos.filter((tipo) => !lerEvento(eventoCom({ tipo })).ok)
+    expect(recusados).toEqual([])
   })
 
   describe('nunca lança: tudo vira { ok: false, motivo }', () => {

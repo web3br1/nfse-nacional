@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+Correção do leitor de evento. **Nenhuma chamada real à Sefin foi feita** (vale o que a 0.1.0 diz).
+
+### Corrigido
+
+- **`lerEvento` aceita o `xs:choice` inteiro de `TCInfPedReg`**: os 16 grupos dos dois XSD v1.01 (`v1.01-20260209` e `PRODREST-v1.01-20261020`, iguais nesse ponto). A 0.1.0 só aceitava 5 (101101, 105102, 305101, 305102, 305103) e recusava com "tipo de evento … fora do XSD" os outros 11, entre eles o **105104** (cancelamento deferido por análise fiscal) e o **105105** (indeferido). Quem usava o leitor para fechar a nota deixava a nota cancelada pela análise fiscal como autorizada.
+- O leitor só devolve o tipo; quais tipos extinguem a nota continua sendo decisão do chamador.
+- Cerca: `test/leitores.test.ts` lê o `xs:choice` dos dois XSD (16 de 16 aceitos) e valida no XSD um pedido 105104 e um 105105 antes de lê-los.
+
 ## 0.1.0
 
 Primeira versão. **Nenhuma chamada real à Sefin foi feita**: o que depende da resposta do servidor é hipótese marcada no código e fica para a T6.1 (produção restrita).
